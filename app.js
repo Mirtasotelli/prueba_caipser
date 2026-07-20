@@ -1,225 +1,332 @@
 // ==========================================
 // CONFIGURACIÓN INICIAL
 // ==========================================
-const ARCHIVO_CSV = "productos.csv"; // Nombre del archivo subido a Cloudflare Pages
-const MI_NUMERO_WHATSAPP = "5492235310709"; //
+const URL_CSV_DIRECTO = "https://raw.githubusercontent.com/TU-USUARIO/TU-REPOSITORIO/main/productos.csv"; 
+const MI_NUMERO_WHATSAPP = "5492235310709"; 
 
 let productos = [];
-let carrito = [];
-let cotizacionDolar = 1200; // Valor de respaldo por si falla la conexión a la API
+let carrito = []; // Estructura: [{ producto, cantidad }]
+let cotizacionDolar = 1200;
+let categoriaActiva = "Todas";
+let productoModalActual = null;
 
 // ==========================================
-// 1. OBTENER COTIZACIÓN DEL DÓLAR
+// 1. OBTENER DÓLAR BLUE
 // ==========================================
-async function obtenerCotizacionDolar() {
+async function obtenerDolar() {
     try {
-        const respuesta = await fetch('https://dolarapi.com/v1/dolares/blue');
-        const datos = await respuesta.json();
-        cotizacionDolar = datos.venta;
-        console.log(`Cotización Dólar Blue cargada: $${cotizacionDolar}`);
-    } catch (error) {
-        console.error("No se pudo obtener la cotización del dólar. Usando valor de respaldo.", error);
+        const res = await fetch('https://dolarapi.com/v1/dolares/blue');
+        const data = await res.json();
+        if (data && data.venta) cotizacionDolar = data.venta;
+    } catch (e) {
+        console.log("Usando dólar de respaldo $1200");
     }
 }
 
 // ==========================================
-// 2. INICIALIZAR LA TIENDA
+// 2. CARGAR Y PROCESAR CSV
 // ==========================================
-async function iniciarTienda() {
-    // Primero obtenemos la cotización del dólar
-    await obtenerCotizacionDolar();
+async function CargarCSV() {
+    await obtenerDolar();
+    
+    try {
+        const respuesta = await fetch(URL_CSV_DIRECTO);
+        const textoCSV = await respuesta.text();
 
-    // Luego leemos el archivo CSV
-    Papa.parse(ARCHIVO_CSV, {
-        download: true,
-        header: true,
-        skipEmptyLines: true,
-        complete: function(results) {
-            productos = results.data;
-            mostrarProductos();
-        },
-        error: function(err) {
-            console.error("Error al leer el archivo CSV:", err);
-        }
-    });
+        Papa.parse(textoCSV, {
+            header: true,
+            skipEmptyLines: true,
+            complete: function(results) {
+                productos = results.data;
+                generarBotonesCategorias();
+                filtrarProductos();
+            }
+        });
+    } catch (error) {
+        console.error("Error al cargar el CSV:", error);
+    }
 }
 
 // ==========================================
-// 3. MOSTRAR PRODUCTOS EN PANTALLA
+// 3. FILTROS Y CATEGORÍAS
 // ==========================================
-function mostrarProductos() {
+function generarBotonesCategorias() {
+    const contenedor = document.getElementById('contenedor-categorias');
+    if (!contenedor) return;
+
+    const categorias = ["Todas", ...new Set(productos.map(p => p.categoria).filter(Boolean))];
+
+    contenedor.innerHTML = categorias.map(cat => `
+        <button onclick="seleccionarCategoria('${cat}')" 
+                class="btn-categoria text-xs font-bold px-3.5 py-1.5 rounded-full whitespace-nowrap transition-all ${cat === categoriaActiva ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}">
+            ${cat}
+        </button>
+    `).join('');
+}
+
+function seleccionarCategoria(cat) {
+    categoriaActiva = cat;
+    generarBotonesCategorias();
+    filtrarProductos();
+}
+
+function filtrarProductos() {
+    const texto = (document.getElementById('input-busqueda')?.value || '').toLowerCase().trim();
+
+    const filtrados = productos.filter(p => {
+        if (!p.nombre) return false;
+        const coincideCat = categoriaActiva === "Todas" || p.categoria === categoriaActiva;
+        const coincideNombre = p.nombre.toLowerCase().includes(texto);
+        return coincideCat && coincideNombre;
+    });
+
+    dibujarProductos(filtrados);
+}
+
+// ==========================================
+// 4. RENDERIZAR PRODUCTOS EN GRILLA
+// ==========================================
+function dibujarProductos(lista) {
     const contenedor = document.getElementById('contenedor-productos');
     if (!contenedor) return;
-    
-    contenedor.innerHTML = '';
 
-    productos.forEach(prod => {
-        if (!prod.id || !prod.nombre) return; // Salta filas dañadas
+    contenedor.innerHTML = "";
 
-        // Calculamos los precios en pesos a partir del USD del CSV
-        const precioMinUSD = parseFloat(prod.precio_minorista) || 0;
-        const precioMayUSD = parseFloat(prod.precio_mayorista) || 0;
+    if (lista.length === 0) {
+        contenedor.innerHTML = `<div class="col-span-full py-16 text-center text-slate-400 font-medium">No se encontraron artículos.</div>`;
+        return;
+    }
 
-        const precioMinARS = Math.round(precioMinUSD * cotizacionDolar);
-        const precioMayARS = Math.round(precioMayUSD * cotizacionDolar);
+    lista.forEach(prod => {
+        const pMinARS = Math.round((parseFloat(prod.precio_minorista) || 0) * cotizacionDolar);
+        const pMayARS = Math.round((parseFloat(prod.precio_mayorista) || 0) * cotizacionDolar);
 
-        // Evaluamos el stock (Acepta 'SI'/'NO' o números como '0', '5')
-        const stockTexto = (prod.stock || '').toString().toLowerCase().trim();
-        const esStockNumerico = !isNaN(parseInt(stockTexto));
-        const tieneStock = esStockNumerico ? parseInt(stockTexto) > 0 : (stockTexto === 'si' || stockTexto === 'disponible');
+        const stockTxt = (prod.stock || '').toString().toLowerCase().trim();
+        const esStockNumerico = !isNaN(parseInt(stockTxt));
+        const tieneStock = esStockNumerico ? parseInt(stockTxt) > 0 : (stockTxt === 'si' || stockTxt === 'disponible');
 
-        // Construimos el botón y etiquetas de stock
-        let botonHTML = '';
-        let opacidadTarjeta = '';
-        let etiquetaStock = '';
+        const botonHTML = tieneStock 
+            ? `<button onclick="event.stopPropagation(); agregarAlCarrito('${prod.id}', 1)" class="bg-slate-900 hover:bg-slate-800 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition-transform active:scale-95">Sumar</button>`
+            : `<button disabled class="bg-slate-100 text-slate-400 px-3 py-1.5 rounded-xl text-xs font-bold cursor-not-allowed">Agotado</button>`;
 
-        if (tieneStock) {
-            botonHTML = `<button onclick="agregarAlCarrito('${prod.id}')" class="bg-black text-white px-3 py-1.5 rounded text-sm font-semibold hover:bg-gray-800 transition">Sumar</button>`;
-            if (esStockNumerico && parseInt(stockTexto) <= 3) {
-                etiquetaStock = `<span class="text-xs font-bold text-orange-500 block mb-1">● Últimas ${stockTexto} unidades</span>`;
-            } else {
-                etiquetaStock = `<span class="text-xs font-bold text-green-600 block mb-1">● Disponible</span>`;
-            }
-        } else {
-            botonHTML = `<button disabled class="bg-gray-200 text-gray-500 px-3 py-1.5 rounded text-sm font-semibold cursor-not-allowed">Sin Stock</button>`;
-            opacidadTarjeta = 'opacity-60';
-            etiquetaStock = `<span class="text-xs font-bold text-red-500 block mb-1">● Agotado</span>`;
-        }
-
-        const tarjeta = `
-            <div class="bg-white p-4 rounded-lg shadow-sm border border-gray-100 flex flex-col justify-between ${opacidadTarjeta}">
+        contenedor.innerHTML += `
+            <div onclick="abrirModal('${prod.id}')" class="bg-white p-3.5 sm:p-4 rounded-2xl shadow-sm border border-slate-200/80 flex flex-col justify-between cursor-pointer hover:shadow-md hover:border-slate-300 transition-all group">
                 <div>
-                    <img src="${prod.imagen}" alt="${prod.nombre}" class="h-44 w-full object-cover mb-3 rounded-md bg-gray-50" onerror="this.src='https://via.placeholder.com/300x300?text=Sin+Imagen'">
-                    ${etiquetaStock}
-                    <h3 class="font-bold text-gray-800 text-base leading-snug mb-1">${prod.nombre}</h3>
-                    <p class="text-gray-400 text-xs mb-3">${prod.categoria}</p>
+                    <div class="overflow-hidden rounded-xl bg-slate-50 mb-3 h-36 sm:h-44">
+                        <img src="${prod.imagen}" class="h-full w-full object-cover group-hover:scale-105 transition-transform duration-300" onerror="this.src='https://via.placeholder.com/300'">
+                    </div>
+                    <span class="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-1">${prod.categoria || 'General'}</span>
+                    <h3 class="font-bold text-slate-900 text-xs sm:text-sm leading-snug mb-2 group-hover:text-emerald-600 transition-colors line-clamp-2">${prod.nombre}</h3>
                 </div>
-                
-                <div class="flex justify-between items-end border-t pt-2 mt-2">
+                <div class="flex justify-between items-end border-t border-slate-100 pt-2.5 mt-2">
                     <div>
-                        <p class="text-xs line-through text-gray-400">$${precioMinARS.toLocaleString('es-AR')}</p>
-                        <p class="font-extrabold text-green-600 text-base">$${precioMayARS.toLocaleString('es-AR')} <span class="text-xs font-normal text-gray-500">x mayor</span></p>
+                        <p class="text-[10px] line-through text-slate-400">$${pMinARS.toLocaleString('es-AR')}</p>
+                        <p class="font-black text-emerald-600 text-sm">$${pMayARS.toLocaleString('es-AR')} <span class="text-[9px] font-normal text-slate-400">x mayor</span></p>
                     </div>
                     ${botonHTML}
                 </div>
             </div>
         `;
-        contenedor.innerHTML += tarjeta;
     });
 }
 
 // ==========================================
-// 4. LÓGICA DEL CARRITO DE COMPRAS
+// 5. POPUP / MODAL INTERACTIVO
 // ==========================================
-function agregarAlCarrito(id) {
-    const producto = productos.find(p => p.id.toString() === id.toString());
-    if (producto) {
-        carrito.push(producto);
-        actualizarCarrito();
+function abrirModal(id) {
+    const prod = productos.find(p => p.id.toString() === id.toString());
+    if (!prod) return;
+
+    productoModalActual = prod;
+
+    const pMinARS = Math.round((parseFloat(prod.precio_minorista) || 0) * cotizacionDolar);
+    const pMayARS = Math.round((parseFloat(prod.precio_mayorista) || 0) * cotizacionDolar);
+
+    const stockTxt = (prod.stock || '').toString().toLowerCase().trim();
+    const esStockNumerico = !isNaN(parseInt(stockTxt));
+    const tieneStock = esStockNumerico ? parseInt(stockTxt) > 0 : (stockTxt === 'si' || stockTxt === 'disponible');
+
+    document.getElementById('modal-imagen').src = prod.imagen;
+    document.getElementById('modal-categoria').innerText = prod.categoria || 'Producto';
+    document.getElementById('modal-nombre').innerText = prod.nombre;
+    document.getElementById('modal-precio-min').innerText = `$${pMinARS.toLocaleString('es-AR')}`;
+    document.getElementById('modal-precio-may').innerText = `$${pMayARS.toLocaleString('es-AR')}`;
+
+    // Resetear la cantidad a 1
+    const inputCant = document.getElementById('modal-cantidad');
+    if (inputCant) inputCant.value = 1;
+
+    const badgeContainer = document.getElementById('modal-stock-badge');
+    const btnContainer = document.getElementById('modal-btn-container');
+
+    if (tieneStock) {
+        badgeContainer.innerHTML = `<span class="inline-block bg-emerald-50 text-emerald-700 text-[10px] font-bold px-2.5 py-0.5 rounded-full border border-emerald-200">● En Stock</span>`;
+        btnContainer.innerHTML = `<button onclick="confirmarAgregarModal()" class="w-full bg-slate-900 text-white py-2.5 rounded-xl font-bold text-xs hover:bg-slate-800 transition-all active:scale-95 shadow-sm">Agregar al Pedido</button>`;
+    } else {
+        badgeContainer.innerHTML = `<span class="inline-block bg-red-50 text-red-700 text-[10px] font-bold px-2.5 py-0.5 rounded-full border border-red-200">● Agotado</span>`;
+        btnContainer.innerHTML = `<button disabled class="w-full bg-slate-100 text-slate-400 py-2.5 rounded-xl font-bold text-xs cursor-not-allowed">Sin Stock</button>`;
     }
+
+    document.getElementById('modal-detalle').classList.remove('hidden');
+}
+
+function cambiarCantidadModal(delta) {
+    const inputCant = document.getElementById('modal-cantidad');
+    if (!inputCant) return;
+
+    let actual = parseInt(inputCant.value) || 1;
+    if (actual + delta >= 1) {
+        inputCant.value = actual + delta;
+    }
+}
+
+function validarCantidadInputModal(input) {
+    let val = parseInt(input.value);
+    if (isNaN(val) || val < 1) {
+        input.value = 1;
+    }
+}
+
+function confirmarAgregarModal() {
+    const inputCant = document.getElementById('modal-cantidad');
+    const cantidad = parseInt(inputCant?.value) || 1;
+
+    if (productoModalActual) {
+        agregarAlCarrito(productoModalActual.id, cantidad);
+        cerrarModal();
+    }
+}
+
+function cerrarModal() {
+    document.getElementById('modal-detalle').classList.add('hidden');
+}
+
+document.getElementById('modal-detalle')?.addEventListener('click', function(e) {
+    if (e.target === this) cerrarModal();
+});
+
+// ==========================================
+// 6. LÓGICA CARRITO Y WHATSAPP
+// ==========================================
+function agregarAlCarrito(id, cantidad = 1) {
+    const prod = productos.find(p => p.id.toString() === id.toString());
+    if (!prod) return;
+
+    const itemExistente = carrito.find(item => item.producto.id.toString() === id.toString());
+
+    if (itemExistente) {
+        itemExistente.cantidad += cantidad;
+    } else {
+        carrito.push({ producto: prod, cantidad: cantidad });
+    }
+
+    actualizarCarrito();
 }
 
 function actualizarCarrito() {
     const lista = document.getElementById('lista-carrito');
-    const totalElemento = document.getElementById('total-precio');
-    const avisoElemento = document.getElementById('aviso-mayorista');
+    const totalEl = document.getElementById('total-precio');
+    const totalMobile = document.getElementById('total-precio-mobile');
+    const cantMobile = document.getElementById('cant-items-mobile');
+    const badgeTotalItems = document.getElementById('badge-total-items');
+    const avisoEl = document.getElementById('aviso-mayorista');
     
     if (!lista) return;
-    lista.innerHTML = '';
+    lista.innerHTML = "";
 
-    // Si hay 5 o más unidades totales en el carrito, se aplica precio mayorista
-    const aplicaMayorista = carrito.length >= 5;
+    const totalUnidades = carrito.reduce((acc, item) => acc + item.cantidad, 0);
+    const aplicaMayorista = totalUnidades >= 5;
     let totalARS = 0;
 
-    carrito.forEach((prod, index) => {
-        const precioUSD = aplicaMayorista ? parseFloat(prod.precio_mayorista) : parseFloat(prod.precio_minorista);
-        const precioARS = Math.round(precioUSD * cotizacionDolar);
-        totalARS += precioARS;
+    carrito.forEach((item, idx) => {
+        const prod = item.producto;
+        const pUSD = aplicaMayorista ? parseFloat(prod.precio_mayorista) : parseFloat(prod.precio_minorista);
+        const pARS = Math.round(pUSD * cotizacionDolar);
+        const subtotal = pARS * item.cantidad;
+        totalARS += subtotal;
 
         lista.innerHTML += `
-            <div class="flex justify-between items-center border-b py-2 text-sm">
-                <div class="pr-2">
-                    <p class="font-medium text-gray-800">${prod.nombre}</p>
-                    <p class="text-xs text-gray-500">$${precioARS.toLocaleString('es-AR')} c/u</p>
+            <div class="flex items-center justify-between bg-slate-50 p-2 rounded-xl text-xs border border-slate-100">
+                <div class="pr-2 truncate">
+                    <p class="font-bold text-slate-800 truncate">${prod.nombre}</p>
+                    <p class="text-[10px] text-slate-400">$${pARS.toLocaleString('es-AR')} c/u</p>
                 </div>
-                <button onclick="eliminarDelCarrito(${index})" class="text-red-500 hover:text-red-700 text-xs font-bold pl-2">✕</button>
+                <div class="flex items-center gap-2 shrink-0">
+                    <div class="flex items-center border bg-white rounded-lg px-1">
+                        <button onclick="modificarCantidadCarrito(${idx}, -1)" class="px-1 text-slate-500 font-bold">-</button>
+                        <span class="px-1.5 font-bold text-slate-900">${item.cantidad}</span>
+                        <button onclick="modificarCantidadCarrito(${idx}, 1)" class="px-1 text-slate-500 font-bold">+</button>
+                    </div>
+                    <button onclick="eliminarDelCarrito(${idx})" class="text-red-500 font-bold hover:text-red-700 text-xs px-1">✕</button>
+                </div>
             </div>
         `;
     });
 
-    if (totalElemento) {
-        totalElemento.innerText = totalARS.toLocaleString('es-AR');
-    }
+    if (totalEl) totalEl.innerText = totalARS.toLocaleString('es-AR');
+    if (totalMobile) totalMobile.innerText = totalARS.toLocaleString('es-AR');
+    if (cantMobile) cantMobile.innerText = totalUnidades;
+    if (badgeTotalItems) badgeTotalItems.innerText = `${totalUnidades} item${totalUnidades !== 1 ? 's' : ''}`;
 
-    // Actualizar cartel de condición mayorista
-    if (avisoElemento) {
+    if (avisoEl) {
         if (aplicaMayorista) {
-            avisoElemento.innerText = "¡Precios mayoristas aplicados!";
-            avisoElemento.className = "text-xs font-bold text-green-600 mb-4 bg-green-50 p-2 rounded text-center";
+            avisoEl.innerText = "¡Precios mayoristas aplicados!";
+            avisoEl.className = "text-xs font-bold text-emerald-700 mb-4 bg-emerald-50 p-2.5 rounded-xl border border-emerald-200 text-center";
         } else {
-            const faltantes = 5 - carrito.length;
-            avisoElemento.innerText = `Llevá ${faltantes} producto${faltantes > 1 ? 's' : ''} más para acceder a precio mayorista.`;
-            avisoElemento.className = "text-xs font-medium text-amber-700 mb-4 bg-amber-50 p-2 rounded text-center";
+            const faltantes = 5 - totalUnidades;
+            avisoEl.innerText = `Llevá ${faltantes} un. más para precio mayorista.`;
+            avisoEl.className = "text-xs font-semibold text-amber-800 mb-4 bg-amber-50 p-2.5 rounded-xl border border-amber-200 text-center";
         }
     }
 }
 
-function eliminarDelCarrito(index) {
-    carrito.splice(index, 1);
+function modificarCantidadCarrito(idx, delta) {
+    if (carrito[idx]) {
+        carrito[idx].cantidad += delta;
+        if (carrito[idx].cantidad <= 0) {
+            carrito.splice(idx, 1);
+        }
+        actualizarCarrito();
+    }
+}
+
+function eliminarDelCarrito(idx) {
+    carrito.splice(idx, 1);
     actualizarCarrito();
 }
 
-// ==========================================
-// 5. ENVIAR PEDIDO POR WHATSAPP
-// ==========================================
 function enviarWhatsApp() {
-    if (carrito.length === 0) {
-        alert("El carrito está vacío. Agregá algún producto antes de enviar tu pedido.");
-        return;
-    }
+    if (carrito.length === 0) return alert("El carrito está vacío");
 
-    const inputNombre = document.getElementById('cliente-nombre');
-    const inputDireccion = document.getElementById('cliente-direccion');
-    const inputNota = document.getElementById('cliente-nota');
+    const nombre = document.getElementById('cliente-nombre')?.value.trim();
+    const direccion = document.getElementById('cliente-direccion')?.value.trim();
+    const nota = document.getElementById('cliente-nota')?.value.trim();
 
-    const nombre = inputNombre ? inputNombre.value.trim() : '';
-    const direccion = inputDireccion ? inputDireccion.value.trim() : '';
-    const nota = inputNota ? inputNota.value.trim() : '';
+    if (!nombre || !direccion) return alert("Por favor, completá Nombre y Dirección.");
 
-    if (!nombre || !direccion) {
-        alert("Por favor, ingresá tu Nombre y Dirección de envío.");
-        return;
-    }
+    let msj = `📦 *NUEVO PEDIDO MAYORISTA*\n\n`;
+    msj += `👤 *Cliente:* ${nombre}\n📍 *Dirección:* ${direccion}\n`;
+    if (nota) msj += `📝 *Nota:* ${nota}\n`;
+    msj += `\n--------------------------------\n\n🛒 *Detalle del Pedido:*\n`;
 
-    // Formateamos el mensaje de WhatsApp
-    let mensaje = `📦 *NUEVO PEDIDO DE CATÁLOGO*\n\n`;
-    mensaje += `👤 *Cliente:* ${nombre}\n`;
-    mensaje += `📍 *Dirección/Localidad:* ${direccion}\n`;
-    if (nota) mensaje += `📝 *Nota:* ${nota}\n`;
-    mensaje += `\n--------------------------------\n\n`;
-    mensaje += `🛒 *Detalle del Pedido:*\n`;
-
-    const aplicaMayorista = carrito.length >= 5;
+    const totalUnidades = carrito.reduce((acc, item) => acc + item.cantidad, 0);
+    const aplicaMayorista = totalUnidades >= 5;
     let totalARS = 0;
 
-    carrito.forEach(prod => {
-        const precioUSD = aplicaMayorista ? parseFloat(prod.precio_mayorista) : parseFloat(prod.precio_minorista);
-        const precioARS = Math.round(precioUSD * cotizacionDolar);
-        totalARS += precioARS;
+    carrito.forEach(item => {
+        const prod = item.producto;
+        const pUSD = aplicaMayorista ? parseFloat(prod.precio_mayorista) : parseFloat(prod.precio_minorista);
+        const pARS = Math.round(pUSD * cotizacionDolar);
+        const subtotal = pARS * item.cantidad;
+        totalARS += subtotal;
 
-        mensaje += `• ${prod.nombre} - *$${precioARS.toLocaleString('es-AR')}*\n`;
+        msj += `• ${item.cantidad}x ${prod.nombre} - *$${subtotal.toLocaleString('es-AR')}*\n`;
     });
 
-    mensaje += `\n--------------------------------\n`;
-    mensaje += `💰 *TOTAL ESTIMADO: $${totalARS.toLocaleString('es-AR')} ARS*\n`;
-    if (aplicaMayorista) {
-        mensaje += `✨ _(Descuento mayorista aplicado por 5+ unidades)_\n`;
-    }
+    msj += `\n--------------------------------\n💰 *TOTAL ESTIMADO: $${totalARS.toLocaleString('es-AR')} ARS*`;
 
-    // Abrimos WhatsApp en una nueva pestaña
-    const URLWhatsApp = `https://wa.me/${MI_NUMERO_WHATSAPP}?text=${encodeURIComponent(mensaje)}`;
-    window.open(URLWhatsApp, '_blank');
+    window.open(`https://wa.me/${MI_NUMERO_WHATSAPP}?text=${encodeURIComponent(msj)}`, '_blank');
 }
 
-// Inicializar al cargar el script
-document.addEventListener('DOMContentLoaded', iniciarTienda);
+// Iniciar app al cargar la página
+document.addEventListener('DOMContentLoaded', CargarCSV);
